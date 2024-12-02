@@ -1,232 +1,266 @@
 import asyncio
+import aiohttp
 import time
 import uuid
 import sys
 import os
-import json
-from pathlib import Path
-from typing import Dict, List, Optional
 
 from curl_cffi import requests
 from loguru import logger
 from colorama import Fore, Style, init
 from fake_useragent import UserAgent
 
-# 初始化colorama
+# 初始化colorama以支持Windows系统
 init(autoreset=True)
 
 # 配置logger，只显示INFO级别以上的日志
 logger.remove()
 logger.add(sys.stderr, format="{time} {level} - {message}", level="INFO", colorize=True)
 
-# 常量定义
+def clear_screen():
+    # Clear the screen based on the operating system
+    if os.name == 'posix':
+        os.system('clear')
+    elif os.name == 'nt':
+        os.system('cls')
+    else:
+        print("\n" * 100)  # Fallback: Print 100 new lines
+
+def show_warning():
+    confirm = input(f"{Fore.YELLOW}多账户NODEPAY机器人 \n\n请确保您有:\n1. 包含您Nodepay令牌的token.txt文件（每行一个）\n2. 包含您的代理列表的proxy.txt文件\n注意：每个令牌最多将获得3个代理\n\n按Enter键继续或按Ctrl+C取消... {Style.RESET_ALL}")
+
+    if confirm.strip() == "":
+        print(f"{Fore.GREEN}继续...{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.RED}退出...{Style.RESET_ALL}")
+        exit()
+
+def display_menu():
+    print(f"\n请选择一个选项:")
+    print(f"{Fore.GREEN}1. 启动节点{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}2. 注册账户{Style.RESET_ALL}")
+    choice = input(f"{Fore.CYAN}输入选项编号: {Style.RESET_ALL}")
+    return choice
+
+def register_accounts():
+    print(f"{Fore.MAGENTA}注册账户功能尚未实现。{Style.RESET_ALL}")
+
+# 常量
 PING_INTERVAL = 60
-MAX_RETRIES = 3
-VERSION = "2.2.7"
+RETRIES = 60
 
 DOMAIN_API = {
     "SESSION": "http://api.nodepay.ai/api/auth/session",
-    "PING": "https://nw.nodepay.org/api/network/ping",
-    "LOGIN": "http://api.nodepay.ai/api/auth/login"
+    "PING": "https://nw.nodepay.org/api/network/ping"
 }
 
-class NodePayBot:
-    def __init__(self):
-        self.browser_id = str(uuid.uuid4())
-        self.account_info: Dict = {}
-        self.last_ping_time: Dict[str, float] = {}
-        self.active_proxies: List[str] = []
-        self.all_tokens: List[str] = []
-        self.session_file = Path("sessions.json")
-        
-    def clear_screen(self):
-        os.system('cls' if os.name == 'nt' else 'clear')
+CONNECTION_STATES = {
+    "已连接": 1,
+    "已断开": 2,
+    "无连接": 3
+}
 
-    def show_warning(self):
-        print(f"{Fore.YELLOW}多账户NODEPAY机器人\n")
-        print("请确保您有:")
-        print("1. 包含您Nodepay令牌的token.txt文件（每行一个）")
-        print("2. 包含您的代理列表的proxy.txt文件")
-        print("注意：每个令牌最多将获得3个代理\n")
-        
-        input(f"按Enter键继续或按Ctrl+C取消... {Style.RESET_ALL}")
-        print(f"{Fore.GREEN}继续...{Style.RESET_ALL}")
+status_connect = CONNECTION_STATES["无连接"]
+browser_id = None
+account_info = {}
+last_ping_time = {}
 
-    def display_menu(self) -> str:
-        print(f"\n请选择一个选项:")
-        print(f"{Fore.GREEN}1. 启动节点{Style.RESET_ALL}")
-        print(f"{Fore.YELLOW}2. 注册账户{Style.RESET_ALL}")
-        print(f"{Fore.BLUE}3. 登录账户获取Token{Style.RESET_ALL}")
-        return input(f"{Fore.CYAN}输入选项编号: {Style.RESET_ALL}")
+def uuidv4():
+    return str(uuid.uuid4())
 
-    def load_files(self):
-        try:
-            with open('proxy.txt', 'r') as f:
-                self.active_proxies = [line.strip() for line in f if line.strip()]
-            
-            with open('token.txt', 'r') as f:
-                self.all_tokens = [line.strip() for line in f if line.strip()]
-                
-            if not self.all_tokens:
-                raise ValueError("Token文件为空")
-                
-            if not self.active_proxies:
-                raise ValueError("代理文件为空")
-                
-        except FileNotFoundError as e:
-            logger.error(f"找不到必要的文件: {e}")
-            sys.exit(1)
-        except Exception as e:
-            logger.error(f"加载文件时出错: {e}")
-            sys.exit(1)
+def valid_resp(resp):
+    if not resp or "code" not in resp or resp["code"] < 0:
+        raise ValueError("无效的响应")
+    return resp
 
-    async def call_api(self, url: str, data: dict, proxy: str, token: str) -> dict:
-        user_agent = UserAgent(os=['windows', 'macos', 'linux'], browsers=['chrome']).random
-        headers = {
-            "Authorization": f"Bearer {token}" if token else "",
-            "User-Agent": user_agent,
-            "Content-Type": "application/json",
-            "Origin": "chrome-extension://lgmpfmgeabnnlemejacfljbmonaomfmm",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.5",
+async def render_profile_info(proxy, token):
+    global browser_id, account_info
+
+    try:
+        np_session_info = load_session_info(proxy)
+
+        if not np_session_info:
+            # 生成新的浏览器ID
+            browser_id = uuidv4()
+            response = await call_api(DOMAIN_API["SESSION"], {}, proxy, token)
+            valid_resp(response)
+            account_info = response["data"]
+            if account_info.get("uid"):
+                save_session_info(proxy, account_info)
+                await start_ping(proxy, token)
+            else:
+                handle_logout(proxy)
+        else:
+            account_info = np_session_info
+            await start_ping(proxy, token)
+    except Exception as e:
+        # No error logging here
+        remove_proxy_from_list(proxy)
+        return None
+
+async def call_api(url, data, proxy, token):
+    user_agent = UserAgent(os=['windows', 'macos', 'linux'], browsers='chrome')
+    random_user_agent = user_agent.random
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": random_user_agent,
+        "Content-Type": "application/json",
+        "Origin": "chrome-extension://lgmpfmgeabnnlemejacfljbmonaomfmm",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
+
+    try:
+        response = requests.post(url, json=data, headers=headers, impersonate="chrome110", proxies={
+                                "http": proxy, "https": proxy}, timeout=30)
+
+        response.raise_for_status()
+        return valid_resp(response.json())
+    except Exception as e:
+        # No error logging here
+        pass
+
+async def start_ping(proxy, token):
+    try:
+        while True:
+            await ping(proxy, token)
+            await asyncio.sleep(PING_INTERVAL)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        # No error logging here
+        pass
+
+async def ping(proxy, token):
+    global last_ping_time, RETRIES, status_connect
+
+    current_time = time.time()
+
+    if proxy in last_ping_time and (current_time - last_ping_time[proxy]) < PING_INTERVAL:
+        return
+
+    last_ping_time[proxy] = current_time
+
+    try:
+        data = {
+            "id": account_info.get("uid"),
+            "browser_id": browser_id,
+            "timestamp": int(time.time()),
+            "version": "2.2.7"
         }
 
-        for _ in range(MAX_RETRIES):
-            try:
-                response = requests.post(
-                    url,
-                    json=data,
-                    headers=headers,
-                    impersonate="chrome110",
-                    proxies={"http": proxy, "https": proxy} if proxy else None,
-                    timeout=30
-                )
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                logger.warning(f"API调用失败: {e}")
-                await asyncio.sleep(1)
-        
-        raise Exception("达到最大重试次数")
-
-    async def ping(self, proxy: str, token: str):
-        current_time = time.time()
-        
-        if proxy in self.last_ping_time and \
-           (current_time - self.last_ping_time[proxy]) < PING_INTERVAL:
-            return
-
-        self.last_ping_time[proxy] = current_time
-
-        try:
-            data = {
-                "id": self.account_info.get("uid"),
-                "browser_id": self.browser_id,
-                "timestamp": int(time.time()),
-                "version": VERSION
-            }
-
-            response = await self.call_api(DOMAIN_API["PING"], data, proxy, token)
-            
-            if response.get("code") == 0:
-                ip_score = response["data"].get("ip_score", "未知")
-                score_text = f"IP分数: {ip_score}" if isinstance(ip_score, (int, float)) \
-                           else f"IP分数: {ip_score}（非数值）"
-                logger.info(f"Ping成功 - 代理: {proxy} - {score_text}")
-                return True
-                
-        except Exception as e:
-            logger.error(f"Ping失败 - 代理: {proxy} - 错误: {e}")
-            return False
-
-    async def render_profile_info(self, proxy: str, token: str) -> Optional[bool]:
-        try:
-            response = await self.call_api(DOMAIN_API["SESSION"], {}, proxy, token)
-            
-            if response.get("code") == 0:
-                self.account_info = response["data"]
-                logger.info(f"账户信息获取成功 - 代理: {proxy}")
-                return True
-            
-            logger.warning(f"账户信息获取失败 - 代理: {proxy}")
-            return False
-            
-        except Exception as e:
-            logger.error(f"处理账户信息时出错 - 代理: {proxy} - 错误: {e}")
-            return None
-
-    async def run_node(self, token: str, proxy: str):
-        try:
-            if await self.render_profile_info(proxy, token):
-                while True:
-                    if not await self.ping(proxy, token):
-                        break
-                    await asyncio.sleep(PING_INTERVAL)
-        except Exception as e:
-            logger.error(f"节点运行错误 - 代理: {proxy} - 错误: {e}")
-
-    async def start_nodes(self):
-        self.load_files()  # 确保文件已加载
-        while True:
-            tasks = []
-            for token in self.all_tokens:
-                for proxy in self.active_proxies[:3]:  # 每个令牌最多3个代理
-                    task = asyncio.create_task(self.run_node(token, proxy))
-                    tasks.append(task)
-            
-            if tasks:
-                await asyncio.gather(*tasks)
-            await asyncio.sleep(10)
-
-    async def login_account(self):
-        email = input("请输入您的电子邮件: ")
-        password = input("请输入您的密码: ")
-        
-        try:
-            data = {
-                "email": email,
-                "password": password,
-                "browser_id": self.browser_id
-            }
-            
-            # 直接发送请求，不使用代理
-            response = await self.call_api(DOMAIN_API["LOGIN"], data, None, "")
-            
-            if response.get("code") == 0:
-                token = response["data"].get("token")
-                if token:
-                    with open('tokenz.txt', 'a') as file:
-                        file.write(f"{token}\n")
-                    logger.info(f"登录成功，Token已保存到tokenz.txt")
-                else:
-                    logger.warning("登录成功，但未获取到Token")
+        response = await call_api(DOMAIN_API["PING"], data, proxy, token)
+        if response["code"] == 0:
+            # 将IP分数翻译成中文
+            ip_score = response["data"].get("ip_score", "未知")
+            if isinstance(ip_score, (int, float)):
+                ip_score_chinese = f"{Fore.GREEN}IP分数: {ip_score}{Style.RESET_ALL}"
             else:
-                logger.error(f"登录失败 - {response.get('message')}")
-        except Exception as e:
-            logger.error(f"登录时发生错误 - {e}")
-
-    async def main(self):
-        self.clear_screen()
-        self.show_warning()
-
-        while True:
-            choice = self.display_menu()
+                ip_score_chinese = f"{Fore.YELLOW}IP分数: {ip_score}（非数值）{Style.RESET_ALL}"
             
-            if choice == "1":
-                print(f"{Fore.GREEN}启动节点...{Style.RESET_ALL}")
-                await self.start_nodes()
-            elif choice == "2":
-                print(f"{Fore.YELLOW}注册账户功能尚未实现{Style.RESET_ALL}")
-            elif choice == "3":
-                await self.login_account()
-            else:
-                print(f"{Fore.RED}无效的选项，请选择1、2或3{Style.RESET_ALL}")
-
-if __name__ == "__main__":
-    bot = NodePayBot()
-    try:
-        asyncio.run(bot.main())
-    except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}程序已停止{Style.RESET_ALL}")
+            logger.info(f"{Fore.CYAN}Ping成功，代理 {proxy}，{ip_score_chinese}{Style.RESET_ALL}")
+            RETRIES = 0
+            status_connect = CONNECTION_STATES["已连接"]
     except Exception as e:
-        logger.error(f"程序出错: {e}")
+        # No error logging here
+        pass
+
+def handle_ping_fail(proxy, response):
+    # No error logging here
+    pass
+
+def handle_logout(proxy):
+    # No error logging here
+    pass
+
+def load_proxies(proxy_file):
+    try:
+        with open(proxy_file, 'r') as file:
+            proxies = file.read().splitlines()
+        return proxies
+    except Exception as e:
+        # No error logging here
+        raise SystemExit(f"{Fore.RED}由于加载代理失败，程序退出。{Style.RESET_ALL}")
+
+def load_tokens(token_file):
+    try:
+        with open(token_file, 'r') as file:
+            tokens = file.read().splitlines()
+        return tokens
+    except Exception as e:
+        # No error logging here
+        raise SystemExit(f"{Fore.RED}由于加载令牌失败，程序退出。{Style.RESET_ALL}")
+
+def save_status(proxy, status):
+    pass
+
+def save_session_info(proxy, data):
+    data_to_save = {
+        "uid": data.get("uid"),
+        "browser_id": browser_id
+    }
+    pass
+
+def load_session_info(proxy):
+    return {}
+
+def is_valid_proxy(proxy):
+    return True
+
+def remove_proxy_from_list(proxy):
+    pass
+
+async def main():
+    clear_screen()  # Clear the screen before starting the script
+    all_proxies = load_proxies('proxy.txt')  # 从文件中加载代理
+    all_tokens = load_tokens('token.txt')  # 从令牌列表中加载令牌
+
+    if not all_tokens:
+        print(f"{Fore.RED}在token.txt中未找到令牌。程序退出。{Style.RESET_ALL}")
+        exit()
+
+    while True:
+        choice = display_menu()
+        
+        if choice == "1":
+            print(f"{Fore.GREEN}启动节点...{Style.RESET_ALL}")
+            while True:
+                for token in all_tokens:
+                    active_proxies = [
+                        proxy for proxy in all_proxies if is_valid_proxy(proxy)][:100]
+                    tasks = {asyncio.create_task(render_profile_info(
+                        proxy, token)): proxy for proxy in active_proxies}
+
+                    done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        failed_proxy = tasks[task]
+                        if task.result() is None:
+                            active_proxies.remove(failed_proxy)
+                            if all_proxies:
+                                new_proxy = all_proxies.pop(0)
+                                if is_valid_proxy(new_proxy):
+                                    active_proxies.append(new_proxy)
+                                    new_task = asyncio.create_task(
+                                        render_profile_info(new_proxy, token))
+                                    tasks[new_task] = new_proxy
+                    tasks.pop(task)
+
+                    for proxy in set(active_proxies) - set(tasks.values()):
+                        new_task = asyncio.create_task(
+                            render_profile_info(proxy, token))
+                        tasks[new_task] = proxy
+                    await asyncio.sleep(3)
+                await asyncio.sleep(10)
+        elif choice == "2":
+            register_accounts()
+        else:
+            print(f"{Fore.RED}无效的选项。请选择1或2。{Style.RESET_ALL}")
+
+if __name__ == '__main__':
+    show_warning()
+    print(f"\n{Fore.GREEN}现在运行...{Style.RESET_ALL}")
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        # No error logging here
+        exit()
