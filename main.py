@@ -15,7 +15,7 @@ from fake_useragent import UserAgent
 # 初始化colorama
 init(autoreset=True)
 
-# 配置logger
+# 配置logger，只显示INFO级别以上的日志
 logger.remove()
 logger.add(sys.stderr, format="{time} {level} - {message}", level="INFO", colorize=True)
 
