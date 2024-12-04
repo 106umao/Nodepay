@@ -211,13 +211,21 @@ def remove_proxy_from_list(proxy):
     pass
 
 async def main():
-    clear_screen()  # Clear the screen before starting the script
-    all_proxies = load_proxies('proxy.txt')  # 从文件中加载代理
-    all_tokens = load_tokens('token.txt')  # 从令牌列表中加载令牌
+    clear_screen()
+    all_proxies = load_proxies('proxy.txt')
+    all_tokens = load_tokens('token.txt')
 
     if not all_tokens:
         print(f"{Fore.RED}在token.txt中未找到令牌。程序退出。{Style.RESET_ALL}")
         exit()
+
+    # 确保每个token只分配一个代理
+    token_proxy_pairs = []
+    for i, token in enumerate(all_tokens):
+        if i < len(all_proxies):  # 确保有足够的代理可用
+            token_proxy_pairs.append((token, all_proxies[i]))
+        else:
+            logger.warning(f"{Fore.YELLOW}警告：代理数量不足，token {token[:8]}... 未分配代理{Style.RESET_ALL}")
 
     while True:
         choice = display_menu()
@@ -225,31 +233,14 @@ async def main():
         if choice == "1":
             print(f"{Fore.GREEN}启动节点...{Style.RESET_ALL}")
             while True:
-                for token in all_tokens:
-                    active_proxies = [
-                        proxy for proxy in all_proxies if is_valid_proxy(proxy)][:100]
-                    tasks = {asyncio.create_task(render_profile_info(
-                        proxy, token)): proxy for proxy in active_proxies}
+                tasks = []
+                # 为每个token-proxy对创建任务
+                for token, proxy in token_proxy_pairs:
+                    task = asyncio.create_task(render_profile_info(proxy, token))
+                    tasks.append(task)
 
-                    done, pending = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:
-                        failed_proxy = tasks[task]
-                        if task.result() is None:
-                            active_proxies.remove(failed_proxy)
-                            if all_proxies:
-                                new_proxy = all_proxies.pop(0)
-                                if is_valid_proxy(new_proxy):
-                                    active_proxies.append(new_proxy)
-                                    new_task = asyncio.create_task(
-                                        render_profile_info(new_proxy, token))
-                                    tasks[new_task] = new_proxy
-                    tasks.pop(task)
-
-                    for proxy in set(active_proxies) - set(tasks.values()):
-                        new_task = asyncio.create_task(
-                            render_profile_info(proxy, token))
-                        tasks[new_task] = proxy
-                    await asyncio.sleep(3)
+                if tasks:
+                    await asyncio.gather(*tasks)
                 await asyncio.sleep(10)
         elif choice == "2":
             register_accounts()
