@@ -96,4 +96,4 @@ for index, token in enumerate(tokens):
     response = curl_requests.post(url, json=data, headers=headers, impersonate="chrome110")
     
     # 延迟5秒后继续下一个处理
-    time.sleep(5)
+    time.sleep(1)

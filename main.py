@@ -1,78 +1,50 @@
+import requests as reqs
 import asyncio
 import aiohttp
 import time
 import uuid
-import sys
-import os
-import random
-
 from curl_cffi import requests
 from loguru import logger
+from fake_useragent import UserAgent
 from colorama import Fore, Style, init
 
-# 初始化colorama以支持Windows系统
-init(autoreset=True)
-
-# 配置logger，只显示INFO级别以上的日志
-logger.remove()
-logger.add(sys.stderr, format="{time} {level} - {message}", level="INFO", colorize=True)
-
-def clear_screen():
-    # Clear the screen based on the operating system
-    if os.name == 'posix':
-        os.system('clear')
-    elif os.name == 'nt':
-        os.system('cls')
-    else:
-        print("\n" * 100)  # Fallback: Print 100 new lines
-
-def show_warning():
-    confirm = input(f"{Fore.YELLOW}多账户NODEPAY机器人 \n\n请确保您有:\n1. 包含您Nodepay令牌的token.txt文件（每行一个）\n2. 包含您的代理列表的proxy.txt文件\n注意：每个令牌最多将获得3个代理\n\n按Enter键继续或按Ctrl+C取消... {Style.RESET_ALL}")
-
-    if confirm.strip() == "":
-        print(f"{Fore.GREEN}继续...{Style.RESET_ALL}")
-    else:
-        print(f"{Fore.RED}退出...{Style.RESET_ALL}")
-        exit()
-
-def display_menu():
-    print(f"\n请选择一个选项:")
-    print(f"{Fore.GREEN}1. 启动节点{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}2. 注册账户{Style.RESET_ALL}")
-    choice = input(f"{Fore.CYAN}输入选项编号: {Style.RESET_ALL}")
-    return choice
-
-def register_accounts():
-    print(f"{Fore.MAGENTA}注册账户功��尚未实现。{Style.RESET_ALL}")
-
-# 常量
+# Constants
 PING_INTERVAL = 60
 RETRIES = 60
-
+TOKEN_FILE = 'token.txt'
+PROXY_FILE = 'proxy.txt'
 DOMAIN_API = {
     "SESSION": "http://api.nodepay.ai/api/auth/session",
     "PING": "https://nw.nodepay.org/api/network/ping"
 }
 
 CONNECTION_STATES = {
-    "已连接": 1,
-    "已断开": 2,
-    "无连接": 3
+    "CONNECTED": 1,
+    "DISCONNECTED": 2,
+    "NONE_CONNECTION": 3
 }
 
-status_connect = CONNECTION_STATES["无连接"]
+status_connect = CONNECTION_STATES["NONE_CONNECTION"]
 browser_id = None
 account_info = {}
-last_ping_time = {}
+last_ping_time = {}  
 
 def uuidv4():
     return str(uuid.uuid4())
 
+def show_copyright():
+    banner = """
+    ╔═══════════════════════════════════════╗
+    ║           NodePay Client              ║
+    ╚═══════════════════════════════════════╝
+    """
+    print(Fore.MAGENTA + Style.BRIGHT + banner + Style.RESET_ALL)
+        
 def valid_resp(resp):
     if not resp or "code" not in resp or resp["code"] < 0:
-        raise ValueError("无效的响应")
+        raise ValueError("Invalid response")
     return resp
-
+    
 async def render_profile_info(proxy, token):
     global browser_id, account_info
 
@@ -80,7 +52,7 @@ async def render_profile_info(proxy, token):
         np_session_info = load_session_info(proxy)
 
         if not np_session_info:
-            # 生成新的浏览器ID
+            # Generate new browser_id
             browser_id = uuidv4()
             response = await call_api(DOMAIN_API["SESSION"], {}, proxy, token)
             valid_resp(response)
@@ -94,40 +66,37 @@ async def render_profile_info(proxy, token):
             account_info = np_session_info
             await start_ping(proxy, token)
     except Exception as e:
-        # No error logging here
-        remove_proxy_from_list(proxy)
-        return None
-
-def load_user_agents(ua_file='useragents.txt'):
-    try:
-        with open(ua_file, 'r') as file:
-            user_agents = file.read().splitlines()
-        return user_agents
-    except Exception as e:
-        logger.warning(f"{Fore.YELLOW}无法加载User-Agent文件，使用默认User-Agent{Style.RESET_ALL}")
-        return ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"]
+        logger.error(f"代理 {proxy} 配置信息处理错误: {e}")
+        error_message = str(e)
+        if any(phrase in error_message for phrase in [
+            "sent 1011 (internal error) keepalive ping timeout; no close frame received",
+            "500 Internal Server Error"
+        ]):
+            logger.info(f"移除错误代理: {proxy}")
+            remove_proxy_from_list(proxy)
+            return None
+        else:
+            logger.error(f"连接错误: {e}")
+            return proxy
 
 async def call_api(url, data, proxy, token):
-    user_agents = load_user_agents()
-    random_user_agent = random.choice(user_agents)
     headers = {
         "Authorization": f"Bearer {token}",
-        "User-Agent": random_user_agent,
         "Content-Type": "application/json",
         "Origin": "chrome-extension://lgmpfmgeabnnlemejacfljbmonaomfmm",
-        "Accept": "application/json",
+        "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.5",
     }
 
     try:
-        response = requests.post(url, json=data, headers=headers, impersonate="chrome110", proxies={
-                                "http": proxy, "https": proxy}, timeout=30)
+        response = requests.post(url, json=data, headers=headers, impersonate="safari15_5", proxies={
+                                "http": proxy, "https": proxy}, timeout=15)
 
         response.raise_for_status()
         return valid_resp(response.json())
     except Exception as e:
-        # No error logging here
-        pass
+        logger.error(f"Error during API call: {e}")
+        raise ValueError(f"Failed API call to {url}")
 
 async def start_ping(proxy, token):
     try:
@@ -135,10 +104,22 @@ async def start_ping(proxy, token):
             await ping(proxy, token)
             await asyncio.sleep(PING_INTERVAL)
     except asyncio.CancelledError:
-        pass
+        logger.info(f"Ping task for proxy {proxy} was cancelled")
     except Exception as e:
-        # No error logging here
-        pass
+        logger.error(f"Error in start_ping for proxy {proxy}: {e}")
+        
+def get_proxy_ip(proxy_string):
+    """Extract only the IP address from proxy string."""
+    try:
+        # 处理形如 http://user:pass@ip:port 的代理字符串
+        if '@' in proxy_string:
+            ip = proxy_string.split('@')[1].split(':')[0]
+        else:
+            # 处理形如 ip:port 的代理字符串
+            ip = proxy_string.split(':')[0]
+        return ip
+    except:
+        return proxy_string
 
 async def ping(proxy, token):
     global last_ping_time, RETRIES, status_connect
@@ -153,34 +134,40 @@ async def ping(proxy, token):
     try:
         data = {
             "id": account_info.get("uid"),
-            "browser_id": browser_id,
+            "browser_id": browser_id,  
             "timestamp": int(time.time()),
             "version": "2.2.7"
         }
 
         response = await call_api(DOMAIN_API["PING"], data, proxy, token)
         if response["code"] == 0:
-            # 将IP分数翻译成中文
-            ip_score = response["data"].get("ip_score", "未知")
-            if isinstance(ip_score, (int, float)):
-                ip_score_chinese = f"{Fore.GREEN}IP分数: {ip_score}{Style.RESET_ALL}"
-            else:
-                ip_score_chinese = f"{Fore.YELLOW}IP分数: {ip_score}（非数值）{Style.RESET_ALL}"
-            
-            logger.info(f"{Fore.CYAN}Ping成功，代理 {proxy}，{ip_score_chinese}{Style.RESET_ALL}")
+            ip_score = response.get("data", {}).get("ip_score", 0)
+            logger.info(f"Ping成功, token后8位:{token[-8:]}, 代理:{get_proxy_ip(proxy)}, IP分数:{ip_score}")
             RETRIES = 0
-            status_connect = CONNECTION_STATES["已连接"]
+            status_connect = CONNECTION_STATES["CONNECTED"]
+        else:
+            handle_ping_fail(proxy, response)
     except Exception as e:
-        # No error logging here
-        pass
+        handle_ping_fail(proxy, None)
 
 def handle_ping_fail(proxy, response):
-    # No error logging here
-    pass
+    global RETRIES, status_connect
+
+    RETRIES += 1
+    if response and response.get("code") == 403:
+        handle_logout(proxy)
+    elif RETRIES < 2:
+        status_connect = CONNECTION_STATES["DISCONNECTED"]
+    else:
+        status_connect = CONNECTION_STATES["DISCONNECTED"]
 
 def handle_logout(proxy):
-    # No error logging here
-    pass
+    global status_connect, account_info
+
+    status_connect = CONNECTION_STATES["NONE_CONNECTION"]
+    account_info = {}
+    save_status(proxy, None)
+    logger.info(f"Logged out and cleared session info for proxy {proxy}")
 
 def load_proxies(proxy_file):
     try:
@@ -188,79 +175,77 @@ def load_proxies(proxy_file):
             proxies = file.read().splitlines()
         return proxies
     except Exception as e:
-        # No error logging here
-        raise SystemExit(f"{Fore.RED}由于加载代理失败，程序退出。{Style.RESET_ALL}")
-
-def load_tokens(token_file):
-    try:
-        with open(token_file, 'r') as file:
-            tokens = file.read().splitlines()
-        return tokens
-    except Exception as e:
-        # No error logging here
-        raise SystemExit(f"{Fore.RED}由于加载令牌失败，程序退出。{Style.RESET_ALL}")
+        logger.error(f"Failed to load proxies: {e}")
+        raise SystemExit("Exiting due to failure in loading proxies")
 
 def save_status(proxy, status):
-    pass
+    pass  
 
 def save_session_info(proxy, data):
     data_to_save = {
         "uid": data.get("uid"),
-        "browser_id": browser_id
+        "browser_id": browser_id  
     }
     pass
 
 def load_session_info(proxy):
-    return {}
+    return {}  
 
 def is_valid_proxy(proxy):
-    return True
+    return True  
 
 def remove_proxy_from_list(proxy):
-    pass
-
+    pass  
+    
+def load_tokens_from_file(filename):
+    try:
+        with open(filename, 'r') as file:
+            tokens = file.read().splitlines()
+        return tokens
+    except Exception as e:
+        logger.error(f"Failed to load tokens: {e}")
+        raise SystemExit("Exiting due to failure in loading tokens")
+        
 async def main():
-    clear_screen()
-    all_proxies = load_proxies('proxy.txt')
-    all_tokens = load_tokens('token.txt')
-
-    if not all_tokens:
-        print(f"{Fore.RED}在token.txt中未找到令牌。程序退出。{Style.RESET_ALL}")
+    all_proxies = load_proxies(PROXY_FILE)  
+    tokens = load_tokens_from_file(TOKEN_FILE)
+    
+    if not tokens:
+        print("Token cannot be empty. Exiting the program.")
+        exit()
+    if not all_proxies:
+        print("Proxies cannot be empty. Exiting the program.")
         exit()
 
-    # 确保每个token只分配一个代理
-    token_proxy_pairs = []
-    for i, token in enumerate(all_tokens):
-        if i < len(all_proxies):  # 确保有足够的代理可用
-            token_proxy_pairs.append((token, all_proxies[i]))
-        else:
-            logger.warning(f"{Fore.YELLOW}警告：代理数量不足，token {token[:8]}... 未分配代理{Style.RESET_ALL}")
-
+    # 确保代理和token数量匹配，创建一一对应的配对
+    min_length = min(len(all_proxies), len(tokens))
+    proxy_token_pairs = list(zip(all_proxies[:min_length], tokens[:min_length]))
+    
     while True:
-        choice = display_menu()
+        tasks = []
+        # 为每个配对创建一个任务
+        for proxy, token in proxy_token_pairs:
+            if is_valid_proxy(proxy):
+                task = asyncio.create_task(render_profile_info(proxy, token))
+                tasks.append(task)
         
-        if choice == "1":
-            print(f"{Fore.GREEN}启动节点...{Style.RESET_ALL}")
-            while True:
-                tasks = []
-                # 为每个token-proxy对创建任务
-                for token, proxy in token_proxy_pairs:
-                    task = asyncio.create_task(render_profile_info(proxy, token))
-                    tasks.append(task)
-
-                if tasks:
-                    await asyncio.gather(*tasks)
-                await asyncio.sleep(10)
-        elif choice == "2":
-            register_accounts()
-        else:
-            print(f"{Fore.RED}无效的选项。请选择1或2。{Style.RESET_ALL}")
+        if tasks:
+            # 等待所有任务完成或有任务完成
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+            
+            # 处理完成的任务
+            for task in done:
+                try:
+                    await task
+                except Exception as e:
+                    logger.error(f"Task failed: {e}")
+        
+        await asyncio.sleep(3)
 
 if __name__ == '__main__':
-    show_warning()
-    print(f"\n{Fore.GREEN}现在运行...{Style.RESET_ALL}")
+    show_copyright()
+    print("\nwelcome to main script...")
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        # No error logging here
-        exit()
+        logger.info("Program terminated by user.")
