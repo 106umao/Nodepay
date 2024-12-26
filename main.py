@@ -13,6 +13,7 @@ PING_INTERVAL = 60
 RETRIES = 60
 TOKEN_FILE = 'token.txt'
 PROXY_FILE = 'proxy.txt'
+DIRECT_PROXY = 'http://local:local@localhost:0000'
 DOMAIN_API = {
     "SESSION": "http://api.nodepay.ai/api/auth/session",
     "PING": "https://nw.nodepay.org/api/network/ping"
@@ -89,7 +90,10 @@ async def call_api(url, data, proxy, token):
     }
 
     try:
-        response = requests.post(url, json=data, headers=headers, impersonate="safari15_5", proxies={
+        if proxy == DIRECT_PROXY:
+            response = requests.post(url, json=data, headers=headers, impersonate="safari15_5", timeout=15)
+        else:
+            response = requests.post(url, json=data, headers=headers, impersonate="safari15_5", proxies={
                                 "http": proxy, "https": proxy}, timeout=15)
 
         response.raise_for_status()
